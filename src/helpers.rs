@@ -292,3 +292,12 @@ impl<ContextData, ImmutableData> ConcurrentDataRef<ContextData, ImmutableData> {
         }
     }
 }
+
+pub struct Sendable<T>(T);
+impl<T> Sendable<T> {
+    pub fn new(val: T) -> Self { Sendable(val) }
+    pub unsafe fn get(&self) -> &T { &self.0 }
+    pub unsafe fn get_mut(&mut self) -> &mut T { &mut self.0 }
+}
+
+unsafe impl<T> Send for Sendable<T> {}
