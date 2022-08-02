@@ -152,7 +152,11 @@ impl<C> HeapContextData<C> {
 
             std::mem::transmute(data.as_ptr())
         } else {
-            std::ptr::null_mut()
+            // By construction, if self.data is None then it is the unit type.
+            // See https://doc.rust-lang.org/std/ptr/index.html
+            // "The canonical way to obtain a pointer that is valid for zero-sized accesses
+            // is NonNull::dangling."
+            std::ptr::NonNull::dangling().as_ptr()
         };
 
         ContextDataRef { ptr: ctx_data }
