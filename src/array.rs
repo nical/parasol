@@ -722,6 +722,36 @@ fn test_heap_range_for_each() {
 #[test]
 fn test_simple_for_each() {
     use crate::ThreadPool;
+
+    let pool = ThreadPool::builder().with_worker_threads(3).build();
+    let mut ctx = pool.pop_context().unwrap();
+
+    for _ in 0..100 {
+        let input = vec![0i32; 2];
+
+        //ctx.for_each(&mut input)
+        //    .run(|_, mut item| { *item += 1; });
+
+        let handle = ctx.task()
+            .with_data(input)
+            .for_each()
+            .run(|_, mut item| { *item += 1; });
+        let input = handle.resolve(&mut ctx);
+
+        for val in &input {
+            assert_eq!(*val, 1);
+          //^^^^^^^^^^^^^^^^^^^ Data race detected between Read on thread `main`
+          //                    and Write on thread `Worker#2` at alloc129891
+        }
+    }
+
+    pool.shut_down().wait();
+}
+
+
+#[test]
+fn test_nested_for_each() {
+    use crate::ThreadPool;
     use std::sync::atomic::{AtomicU32, Ordering};
     static INITIALIZED_WORKERS: AtomicU32 = AtomicU32::new(0);
     static SHUTDOWN_WORKERS: AtomicU32 = AtomicU32::new(0);
