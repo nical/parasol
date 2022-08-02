@@ -100,73 +100,18 @@ impl Event {
     }
 
     pub fn signal(&self, ctx: &mut Context, n: u32) -> bool {
-        if n > 2000 {
-            println!("signaling {:?} of {:?}", n, self.deps.load(Ordering::SeqCst));
+        unsafe {
+            Self::signal_ptr(self as *const Self, ctx, n)
         }
-        debug_assert!(!self.is_signaled(), "already signaled {:?}:{:?}", self as *const _, self.id); // TODO: this fails
-        debug_assert!(self.deps.load(Ordering::SeqCst) >= 1);
-        //assert_eq!(self.thread_pool_id, ctx.thread_pool_id());
-
-        profiling::scope!("signal");
-        let n = n as i32;
-        let deps = self.deps.fetch_add(-n, Ordering::Relaxed) - n;
-
-        if deps > 0 {
-            // After reading deps, it isn't guaranteed that self is valid except for the
-            // one thread which signaled the last dependency (the one thread not taking this
-            // branch).
-            return false;
-        }
-
-        debug_assert!(deps == 0, "signaled too many time");
-
-        self.state.store(STATE_SIGNALING, Ordering::SeqCst);
-
-        // Executing the first job ourselves avoids the overhead of going
-        // through the job queue.
-        // TODO: this can create an unbounded recursion.
-        // We could track the recursion level in Context and decide whether to
-        // execute the first job ourselves based on that.
-        let mut first = None;
-        self.waiting_jobs.pop_all(&mut |job| {
-            if first.is_none() {
-                first = Some(job);
-            } else {
-                ctx.schedule_job(job)
-            }
-        });
-
-        {
-            std::mem::drop(self.mutex.lock().unwrap());
-
-            self.cond.notify_all();
-        }
-
-        // It is important to mark this atomic boolean after setting the event.
-        // when waiting we can only assume that the wait is over when this atomic
-        // is set to true waiting on the event is not sufficient. This is because
-        // we have to make sure this store can safely happen.
-        // If we'd do the store before setting the event, then setting the event
-        // would not be safe because the waiting thread might have continued from
-        // an early-out on the state check. The waiting thread is responsible
-        // for keeping the event alive state has been set to true.
-        self.state.store(STATE_SIGNALED, Ordering::Release);
-
-        // After the state store above, self isn't guaranteed to be valid.
-
-        if let Some(job) = first {
-            unsafe {
-                job.execute(ctx);
-            }
-        }
-
-        true
     }
 
+    /// Same as Event::signal but only needs a *const pointer to self instead of &Self.
+    ///
+    /// Prefer this over Event::signal when signaling from a thread that does not own the
+    /// event. Since the event memory can go away at any time once after decrementing deps
+    /// or setting state to STATE_SIGNALED, it is important for self to be a *const pointer
+    /// so that miri allows the memory to disappear before the pointer.
     pub unsafe fn signal_ptr(this: *const Self, ctx: &mut Context, n: u32) -> bool {
-        if n > 2000 {
-            println!("signaling {:?} of {:?}", n, (*this).deps.load(Ordering::SeqCst));
-        }
         debug_assert!(!(*this).is_signaled(), "already signaled {:?}:{:?}", this, (*this).id); // TODO: this fails
         debug_assert!((*this).deps.load(Ordering::SeqCst) >= 1);
         //assert_eq!((*this).thread_pool_id, ctx.thread_pool_id());
@@ -219,9 +164,7 @@ impl Event {
         // After the state store above, self isn't guaranteed to be valid.
 
         if let Some(job) = first {
-            unsafe {
-                job.execute(ctx);
-            }
+            job.execute(ctx);
         }
 
         true
@@ -364,7 +307,6 @@ pub struct EventRef {
 }
 
 unsafe impl Send for EventRef {}
-unsafe impl Sync for EventRef {}
 
 impl EventRef {
     pub unsafe fn signal(&self, ctx: &mut Context, n: u32) -> bool {
@@ -456,21 +398,6 @@ impl<T> Drop for AtomicLinkedList<T> {
 
 #[test]
 fn test_event() {
-    // This test currently fails under miri.
-    // An item (presumably the Event) is deallocated (at the end of the loop)
-    // while protected by a scope. I suspect that the scope is the Event::signal
-    // method call.
-    // writing STATE_SIGNALED in Event::state is the last write that happens on
-    // the event's memory on the worker thread, and Event::wait does not return
-    // until the state has been set to STATE_SIGNALED so we are guaranteeing that
-    // the memory is not deallocated until after the last write to event's memory.
-    //
-    // miri fails this test even though the assertion that the state is signaled
-    // never fails, so this suggests that miri wants the event to be alive for
-    // longer than after the last write operation on it.
-    // Perhaps the existence of the &self reference in signal means miri wants
-    // the event to live until after then end of signal's function scope?
-
     use crate::helpers::Sendable;
 
     use crate::ThreadPool;
@@ -481,14 +408,17 @@ fn test_event() {
 
     let mut ctx = pool.pop_context().unwrap();
 
-    for _ in 0..10000 {
+    for _ in 0..1000 {
         let mut memory = 0u32;
         let mut memory_ref = Sendable::new(&mut memory as *mut u32);
         let event = Event::new(1, pool.id());
         let event_ref = event.unsafe_ref();
 
         ctx.run(
-            |ctx| {
+            // Note: it's easy to forget to make the callback move
+            // and end up capturing locals by ref which mostly works
+            // but does not make miri happy.
+            move |ctx| {
                 unsafe {
                     **memory_ref.get_mut() = 1;
                     event_ref.signal(ctx, 1);
@@ -500,7 +430,7 @@ fn test_event() {
         event.wait(&mut ctx);
         assert!(event.is_signaled());
         assert_eq!(memory, 1);
-    } // miri: deallocating while item [SharedReadOnly for <1063826>] is protected by call 283729
+    }
 
     pool.shut_down().wait();
 }

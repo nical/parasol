@@ -232,7 +232,7 @@ where
             context_data,
             immutable_data,
         }));
-        (*this).event.signal(ctx, 1);
+        Event::signal_ptr(&(*this).event, ctx, 1);
     }
 }
 

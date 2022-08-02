@@ -372,7 +372,7 @@ where
         // know when scheduling this what the size of the input would be, fix that
         // up now.
         let num_items = (*array_job).range.end - (*array_job).range.start;
-        (*array_job).event.signal(ctx, Event::MAX_DEPENDECIES - num_items);
+        Event::signal_ptr(&(*array_job).event, ctx, Event::MAX_DEPENDECIES - num_items);
 
         // Store it directly in our output slot.
         (*heap_job).output.set(items);
@@ -421,7 +421,7 @@ where
         (this.function)(ctx, args);
     }
 
-    this.event.signal(ctx, n)
+    Event::signal_ptr(&this.event, ctx, n)
 }
 
 impl<Item, ContextData, ImmutableData, Func> Job for ArrayJob<Item, ContextData, ImmutableData, Func>
