@@ -7,7 +7,6 @@ use crate::handle::*;
 use crate::task::{TaskBuilder, TaskDependency};
 use crate::ref_counted::{RefCounted, RefPtr};
 
-use std::mem;
 use std::ops::{Range, Deref, DerefMut};
 use std::cell::UnsafeCell;
 
@@ -331,6 +330,10 @@ where
 {
     unsafe fn execute(this: *const Self, ctx: &mut Context, range: Range<u32>) {
         if execute_impl(&(*this).array_job, ctx, range) {
+            // Note: with heap jobs the event and job memory lifetime is guarded by
+            // reference counting and not some thread being unblocked, so it is safe
+            // to access "this" after the signal call in execute_impl, however any
+            // access after release_ref is forbidden.
             if let Some(strong_ref) = &(*this).strong_ref {
                 (&**strong_ref).release_ref();
             }
@@ -393,23 +396,22 @@ where
     }
 }
 
-// Returns true if this execution was the one that put the vent in the signaled state.
+// Returns true if this execution was the one that put the event in the signaled state.
 unsafe fn execute_impl<I, CD, ID, F>(this: *const ArrayJob<I, CD, ID, F>, ctx: &mut Context, range: Range<u32>) -> bool
 where
     F: Fn(&mut Context, Args<I, CD, ID>) + Send,
 
 {
-    let this: &ArrayJob<I, CD, ID, F> = mem::transmute(this);
     let n = range.end - range.start;
 
-    assert!(range.start >= this.range.start && range.end <= this.range.end);
+    assert!(range.start >= (*this).range.start && range.end <= (*this).range.end);
 
-    let (context_data, immutable_data) = this.data.get(ctx);
+    let (context_data, immutable_data) = (*this).data.get(ctx);
 
     for item_idx in range {
         // SAFETY: The situation for the item pointer is the same as with context_data.
-        // The pointer can be null, but when it is the case, the type is always ().
-        let item = &mut *this.items.wrapping_offset(item_idx as isize);
+        // The pointer can be dangling, but when it is the case, the type is always ().
+        let item = &mut *(*this).items.wrapping_offset(item_idx as isize);
         profiling::scope!("job");
         let args = Args {
             item,
@@ -418,10 +420,10 @@ where
             immutable_data,
         };
 
-        (this.function)(ctx, args);
+        ((*this).function)(ctx, args);
     }
 
-    Event::signal_ptr(&this.event, ctx, n)
+    Event::signal_ptr(&(*this).event, ctx, n)
 }
 
 impl<Item, ContextData, ImmutableData, Func> Job for ArrayJob<Item, ContextData, ImmutableData, Func>
@@ -661,7 +663,7 @@ fn test_heap_for_each() {
     let mut items2 = vec![0u32; 8192];
     let mut items3 = vec![0u32; 8192];
 
-    for i in 0..3000 {
+    for i in 0..1000 {
         use std::mem::take;
         let handle_1 = ctx.task()
             .with_data(take(&mut items1))
@@ -694,7 +696,6 @@ fn test_heap_for_each() {
     }
 
     pool.shut_down().wait();
-    // double-free vec (easier to reproduce when CPU under load)
 }
 
 #[test]
@@ -726,17 +727,17 @@ fn test_simple_for_each() {
     let pool = ThreadPool::builder().with_worker_threads(3).build();
     let mut ctx = pool.pop_context().unwrap();
 
-    for _ in 0..100 {
-        let input = vec![0i32; 2];
+    for _ in 0..1000 {
+        let mut input = vec![0i32; 8];
 
-        //ctx.for_each(&mut input)
-        //    .run(|_, mut item| { *item += 1; });
-
-        let handle = ctx.task()
-            .with_data(input)
-            .for_each()
+        ctx.for_each(&mut input)
             .run(|_, mut item| { *item += 1; });
-        let input = handle.resolve(&mut ctx);
+
+        //let handle = ctx.task()
+        //    .with_data(input)
+        //    .for_each()
+        //    .run(|_, mut item| { *item += 1; });
+        //let input = handle.resolve(&mut ctx);
 
         for val in &input {
             assert_eq!(*val, 1);

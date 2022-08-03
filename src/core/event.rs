@@ -111,10 +111,18 @@ impl Event {
     /// event. Since the event memory can go away at any time once after decrementing deps
     /// or setting state to STATE_SIGNALED, it is important for self to be a *const pointer
     /// so that miri allows the memory to disappear before the pointer.
+    ///
+    /// One of the ways Event can be used is by being on the stack of the thread that dispatch
+    /// jobs and using Event::wait on that thread to ensure the even and job data lives long
+    /// enough. In this situation:
+    ///  - On any other thread, there *must* be no access to the event nor any job data which
+    ///    lifetime is tied to the even after calling signal_ptr.
+    ///    Signaling should always be the very last thing that a job does since it can unblock
+    ///    threads that could deallocate the event itself and associated job data if any.
     pub unsafe fn signal_ptr(this: *const Self, ctx: &mut Context, n: u32) -> bool {
-        debug_assert!(!(*this).is_signaled(), "already signaled {:?}:{:?}", this, (*this).id); // TODO: this fails
+        debug_assert!(!(*this).is_signaled(), "already signaled {:?}:{:?}", this, (*this).id);
         debug_assert!((*this).deps.load(Ordering::SeqCst) >= 1);
-        //assert_eq!((*this).thread_pool_id, ctx.thread_pool_id());
+        assert_eq!((*this).thread_pool_id, ctx.thread_pool_id());
 
         profiling::scope!("signal");
         let n = n as i32;
@@ -239,6 +247,9 @@ impl Event {
         // working if there is new work.
 
         {
+            // Note: this important to guarantee the scheduler never deadlocks: A thread
+            // waiting on some work to finish must not go to sleep unless its job queues
+            // are empty. The try_wait call here ensures that.
             if self.try_wait(ctx) {
                 return;
             }
@@ -262,7 +273,6 @@ impl Event {
 
         // We have to spin until state has been stored to ensure that it is safe
         // for the signaling thread to do the store operation.
-        // TODO: would it be better to spin in the destructor?
 
         let backoff = Backoff::new();
 
@@ -316,8 +326,8 @@ impl EventRef {
 
 impl Drop for Event {
     fn drop(&mut self) {
-        //debug_assert_eq!(self.deps.load(Ordering::Acquire), 0);
-        //debug_assert!(self.state.load(Ordering::Acquire) == STATE_SIGNALED);
+        debug_assert_eq!(self.deps.load(Ordering::Acquire), 0);
+        debug_assert!(self.state.load(Ordering::Acquire) == STATE_SIGNALED);
     }
 }
 
