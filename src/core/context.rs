@@ -100,16 +100,6 @@ impl Context {
 
     #[inline]
     pub fn with_priority<'c>(&'c mut self, priority: Priority) -> Parameters<'c, 'static, 'static, (), ()> {
-        // TODO: miri does not like how we create a `&mut ()` out of a null pointer when no
-        // conetxt data is passed. We can trick it into not tracking the pointer by crafting
-        // casting a slice of size zero with a non-zero address casted from an integer.
-        // Unfortunately that's super scary and maybe even more prone to turn into actual UB.
-        //let context_data: &'static mut [()] = unsafe {
-        //    std::slice::from_raw_parts_mut(
-        //        std::mem::transmute(0xdeadbeefusize),
-        //        0,
-        //    )
-        //};
         Parameters {
             ctx: self,
             context_data: &mut[],

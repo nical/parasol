@@ -9,6 +9,7 @@ use crate::task::TaskParameters;
 
 use std::ops::Deref;
 use std::sync::Arc;
+use std::ptr::NonNull;
 
 /// A builder for common execution parameters such as priority and context data.
 pub struct Parameters<'c, 'cd, 'id, ContextData, ImmutableData> {
@@ -144,19 +145,20 @@ impl<C> HeapContextData<C> {
             // of them at any given time.
             assert_eq!(self.ctx, Some(ctx.id()));
         }
-        let ctx_data: *mut C = if let Some(data) = &self.data {
+        let ctx_data: NonNull<C> = if let Some(data) = &self.data {
             // Note: This check is important for the safety of ContextDataRef::get.
             let min = ctx.num_worker_threads() as usize + 1;
             let count = data.len();
             assert!(count >= min, "Got {:?} context items, need at least {:?}", count, min);
 
-            std::mem::transmute(data.as_ptr())
+            let ptr: *mut C = std::mem::transmute(data.as_ptr());
+            NonNull::new(ptr).unwrap()
         } else {
             // By construction, if self.data is None then it is the unit type.
             // See https://doc.rust-lang.org/std/ptr/index.html
             // "The canonical way to obtain a pointer that is valid for zero-sized accesses
             // is NonNull::dangling."
-            std::ptr::NonNull::dangling().as_ptr()
+            NonNull::dangling()
         };
 
         ContextDataRef { ptr: ctx_data }
@@ -186,7 +188,7 @@ impl<C> HeapContextData<C> {
 ///
 /// Used internally by various job implementations.
 pub struct ContextDataRef<ContextData> {
-    ptr: *mut ContextData,
+    ptr: NonNull<ContextData>,
 }
 
 impl<ContextData> ContextDataRef<ContextData> {
@@ -202,7 +204,7 @@ impl<ContextData> ContextDataRef<ContextData> {
         // here.
         //
         // TODO: unfortunately miri errors when producing &mut () from a null pointer.
-        &mut *self.ptr.wrapping_offset(context_data_index)
+        &mut *self.ptr.as_ptr().wrapping_offset(context_data_index)
     }
 
     /// Returns unsafe references to the context data and immutable data.
@@ -212,7 +214,12 @@ impl<ContextData> ContextDataRef<ContextData> {
     #[inline]
     pub unsafe fn from_ref<'c, 'cd, 'id, ImmutableData>(parameters: &mut Parameters<'c, 'cd, 'id, ContextData, ImmutableData>) -> ContextDataRef<ContextData> {
         ContextDataRef {
-            ptr: parameters.context_data.as_mut_ptr(),
+            ptr: if parameters.context_data.is_empty() {
+                // If we take this branch, ContextData *must* be the unit type ().
+                NonNull::dangling()
+            } else {
+                NonNull::new(parameters.context_data.as_mut_ptr()).unwrap()
+            }
         }
     }
 
