@@ -312,3 +312,11 @@ impl<T> Sendable<T> {
 }
 
 unsafe impl<T> Send for Sendable<T> {}
+
+pub fn heap_alloc<T>(val: T) -> *mut T {
+    Box::into_raw(Box::new(val))
+}
+
+pub unsafe fn heap_dealloc<T>(ptr: *mut T) {
+    let _ = Box::from_raw(ptr);
+}

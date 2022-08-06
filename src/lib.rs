@@ -18,6 +18,7 @@
 
 mod core;
 mod array;
+mod workload;
 mod join;
 pub mod util;
 mod task;
@@ -27,6 +28,7 @@ pub mod ref_counted;
 
 pub use array::ForEachBuilder;
 pub use join::*;
+pub use workload::*;
 pub use crate::core::job::Priority;
 pub use crate::core::context::*;
 pub use crate::core::event::Event;

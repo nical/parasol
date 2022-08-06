@@ -63,8 +63,14 @@ impl<T: 'static> RefPtr<T> {
     }
 
     pub unsafe fn mut_payload_unchecked(this: &Self) -> *mut T {
-        &mut (*this.ptr).payload
+        let ptr: *mut T = &mut (*this.ptr).payload;
+        ptr
     }
+
+    pub unsafe fn payload_unchecked(this: &Self) -> *const T {
+        &(*this.ptr).payload
+    }
+
 
     pub fn as_raw(this: &Self) -> *const InlineRefCounted<T> {
         (*this).ptr

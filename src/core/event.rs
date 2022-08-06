@@ -86,11 +86,10 @@ impl Event {
         AliasableBox::from_unique(Box::new(Event::new(deps, pool_id)))
     }
 
-    pub fn reset(&mut self, deps: u32, thread_pool_id: ThreadPoolId) {
+    pub fn reset(&mut self, deps: u32) {
         assert!(self.state.load(Ordering::Acquire) == STATE_SIGNALED);
 
         let state = if deps == 0 { STATE_SIGNALED } else { STATE_DEFAULT };
-        self.thread_pool_id = thread_pool_id;
         self.state.store(state, Ordering::Release);
         self.deps.store(deps as i32, Ordering::Release);
     }
@@ -176,6 +175,48 @@ impl Event {
         }
 
         true
+    }
+
+    pub unsafe fn signal2(this: *const Self, n: u32) -> Option<AtomicLinkedList<JobRef>> {
+        debug_assert!(!(*this).is_signaled(), "already signaled {:?}:{:?}", this, (*this).id);
+        debug_assert!((*this).deps.load(Ordering::SeqCst) >= 1);
+
+        profiling::scope!("signal");
+        let n = n as i32;
+        let deps = (*this).deps.fetch_add(-n, Ordering::Relaxed) - n;
+
+        if deps > 0 {
+            // After reading deps, it isn't guaranteed that self is valid except for the
+            // one thread which signaled the last dependency (the one thread not taking this
+            // branch).
+            return None;
+        }
+
+        debug_assert!(deps == 0, "signaled too many time");
+
+        (*this).state.store(STATE_SIGNALING, Ordering::SeqCst);
+
+        let waiting_gobs = (*this).waiting_jobs.take();
+
+        {
+            std::mem::drop((*this).mutex.lock().unwrap());
+
+            (*this).cond.notify_all();
+        }
+
+        // It is important to mark this atomic boolean after setting the event.
+        // when waiting we can only assume that the wait is over when this atomic
+        // is set to true waiting on the event is not sufficient. This is because
+        // we have to make sure this store can safely happen.
+        // If we'd do the store before setting the event, then setting the event
+        // would not be safe because the waiting thread might have continued from
+        // an early-out on the state check. The waiting thread is responsible
+        // for keeping the event alive state has been set to true.
+        (*this).state.store(STATE_SIGNALED, Ordering::Release);
+
+        // After the state store above, self isn't guaranteed to be valid.
+
+        Some(waiting_gobs)
     }
 
     #[inline]
@@ -351,6 +392,10 @@ impl<T> AtomicLinkedList<T> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.first.load(Ordering::Relaxed) == std::ptr::null_mut()
+    }
+
     pub fn push(&self, payload: T) {
         let node = Box::into_raw(Box::new(Node {
             payload: Some(payload),
@@ -395,6 +440,14 @@ impl<T> AtomicLinkedList<T> {
                 node = next;
             }
         }
+    }
+
+    pub fn take(&self) -> Self {
+        let list = AtomicLinkedList {
+            first: AtomicPtr::new(self.first.swap(std::ptr::null_mut(), Ordering::Relaxed)),
+        };
+
+        list
     }
 }
 

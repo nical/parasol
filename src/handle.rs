@@ -46,7 +46,7 @@ impl<T> DataSlot<T> {
     #[inline]
     pub unsafe fn set(&self, payload: T) {
         debug_assert!((*self.cell.get()).is_none());
-        (*self.cell.get()) = Some(payload);
+        *self.cell.get() = Some(payload);
     }
 
     /// Move the data out of the slot.
@@ -71,6 +71,30 @@ impl<T> DataSlot<T> {
     pub unsafe fn get_ref(&self) -> &T {
         (*self.cell.get()).as_ref().unwrap()
     }
+
+    pub fn unsafe_ref(&self) -> DataSlotRef<T> {
+        DataSlotRef { slot: self }
+    }
+}
+
+pub struct DataSlotRef<T> {
+    slot: *const DataSlot<T>,
+}
+
+impl<T> DataSlotRef<T> {
+    pub unsafe fn take(&self) -> T {
+        (*(*self.slot).cell.get()).take().unwrap()
+    }
+
+    pub unsafe fn get_ref(&self) -> &T {
+        (*(*self.slot).cell.get()).as_ref().unwrap()
+    }
+}
+
+impl<T> Clone for DataSlotRef<T> {
+    fn clone(&self) -> Self {
+        DataSlotRef { slot: self.slot }
+    }
 }
 
 /// A non-clonable handle which owns the result.
@@ -78,14 +102,14 @@ pub struct OwnedHandle<Output> {
     // Maintains the task's data alive.
     job_data: AnyRefPtr,
     event: *const Event,
-    output: *const DataSlot<Output>,
+    output: DataSlotRef<Output>,
 }
 
 impl<Output> OwnedHandle<Output> {
     pub unsafe fn new(
         job_data: AnyRefPtr,
         event: *const Event,
-        output: *const DataSlot<Output>,
+        output: DataSlotRef<Output>,
     ) -> Self {
         OwnedHandle { job_data, event, output }
     }
@@ -100,14 +124,14 @@ impl<Output> OwnedHandle<Output> {
     pub fn resolve(self, ctx: &mut Context) -> Output {
         self.wait(ctx);
         unsafe {
-            (*self.output).take()
+            self.output.take()
         }
     }
 
     pub fn resolve_assuming_ready(self) -> Output {
         assert!(self.poll(), "Handle is not ready.");
         unsafe {
-            (*self.output).take()
+            self.output.take()
         }
     }
 
@@ -141,7 +165,7 @@ impl<Output> SharedHandle<Output> {
     pub unsafe fn new(
         job_data: AnyRefPtr,
         event: *const Event,
-        output: *mut DataSlot<Output>,
+        output: DataSlotRef<Output>,
     ) -> Self {
         SharedHandle {
             inner: OwnedHandle::new(job_data, event, output)
@@ -151,7 +175,7 @@ impl<Output> SharedHandle<Output> {
     pub fn wait(&self, ctx: &mut Context) -> &Output {
         unsafe {
             (*self.inner.event).wait(ctx);
-            (*self.inner.output).get_ref()
+            self.inner.output.get_ref()
         }
     }
 
@@ -170,7 +194,7 @@ impl<Output> Clone for SharedHandle<Output> {
             inner: OwnedHandle {
                 job_data: self.inner.job_data.clone(),
                 event: self.inner.event,
-                output: self.inner.output,
+                output: self.inner.output.clone(),
             }
         }
     }
@@ -210,7 +234,7 @@ impl<T> TaskDependency for OwnedHandle<T> {
     fn get_output(&self) -> T {
         unsafe {
             debug_assert!((*self.event).is_signaled());
-            (*self.output).take()
+            self.output.take()
         }
     }
 

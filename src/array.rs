@@ -210,7 +210,7 @@ where
         // of not having to block the thread so it usually a win.
         if parallel.range.start > first_item {
             profiling::scope!("mt:job group");
-            let (context_data, immutable_data) = job_data.data.get(ctx);
+            let (context_data, immutable_data) = job_data.data.refs.get(ctx);
             for item_index in first_item..parallel.range.start {
                 let item = &mut params.items[item_index as usize];
                 profiling::scope!("mt:job");
@@ -221,7 +221,7 @@ where
                     immutable_data,
                 };
 
-                (job_data.function)(ctx, args);
+                (job_data.data.function)(ctx, args);
             }
 
             job_data.event.signal(ctx, parallel.range.start - first_item);
@@ -292,22 +292,27 @@ impl DispatchParameters {
     }
 }
 
+struct ArrayJobData<Item, ContextData, ImmutableData, Func> {
+    items: *mut Item,
+    refs: ConcurrentDataRef<ContextData, ImmutableData>,
+    function: Func,
+    range: Range<u32>,
+    split_thresold: u32,
+}
+
 /// A job that represents an array-like workload, for example updating a slice of items in parallel.
 ///
 /// Once the workload starts, the object must NOT move or be dropped until the workload completes.
 /// Typically this structure leaves on the stack if we know the workload to end within this stack
 /// frame (see `for_each`) or on the heap otherwise.
 struct ArrayJob<Item, ContextData, ImmutableData, Func> {
-    items: *mut Item,
-    data: ConcurrentDataRef<ContextData, ImmutableData>,
-    function: Func,
-    range: Range<u32>,
-    split_thresold: u32,
+    data: ArrayJobData<Item, ContextData, ImmutableData, Func>,
     event: Event,
 }
 
 struct HeapArrayJob<Item, ContextData, ImmutableData, Func> {
-    array_job: ArrayJob<Item, ContextData, ImmutableData, Func>,
+    data: UnsafeCell<ArrayJobData<Item, ContextData, ImmutableData, Func>>,
+    event: Event,
     // Context and immtable data string references to maintain the memory
     // alive.
     #[allow(dead_code)] context_data: HeapContextData<ContextData>,
@@ -317,7 +322,7 @@ struct HeapArrayJob<Item, ContextData, ImmutableData, Func> {
 }
 
 struct DeferredArrayJob<Dep, Item, ContextData, ImmutableData, Func> {
-    heap_job: UnsafeCell<HeapArrayJob<Item, ContextData, ImmutableData, Func>>,
+    heap_job: HeapArrayJob<Item, ContextData, ImmutableData, Func>,
     input: Dep,
     priority: Priority,
     group_size: u32,
@@ -329,7 +334,7 @@ where
     Func: Fn(&mut Context, Args<Item, ContextData, ImmutableData>) + Send,
 {
     unsafe fn execute(this: *const Self, ctx: &mut Context, range: Range<u32>) {
-        if execute_impl(&(*this).array_job, ctx, range) {
+        if execute_impl(UnsafeCell::raw_get(&(*this).data), &(*this).event, ctx, range) {
             // Note: with heap jobs the event and job memory lifetime is guarded by
             // reference counting and not some thread being unblocked, so it is safe
             // to access "this" after the signal call in execute_impl, however any
@@ -358,8 +363,9 @@ where
         // It is safe because at this stage there is no other job pointing to this
         // memory location. It won't be safe to make new mutations during and after
         // the for_each_dispatch call.
-        let heap_job: *mut _ = (*this).heap_job.get();
-        let array_job: *mut _ = &mut (*heap_job).array_job;
+        let heap_job: *const _ = &(*this).heap_job;
+        let event: *const Event = &(*heap_job).event;
+        let array_job: *mut _ = UnsafeCell::raw_get(&(*heap_job).data);
 
         (*array_job).items = items.as_mut_ptr();
 
@@ -370,12 +376,6 @@ where
         } else {
             assert!((*array_job).range.end <= items.len() as u32);
         }
-
-        // The event was initialized with u32::MAX dependency because we didn't
-        // know when scheduling this what the size of the input would be, fix that
-        // up now.
-        let num_items = (*array_job).range.end - (*array_job).range.start;
-        Event::signal_ptr(&(*array_job).event, ctx, Event::MAX_DEPENDECIES - num_items);
 
         // Store it directly in our output slot.
         (*heap_job).output.set(items);
@@ -393,11 +393,22 @@ where
             &dispatch,
             (*this).group_size,
         );
+
+        // The event was initialized with u32::MAX dependency because we didn't
+        // know when scheduling this what the size of the input would be, fix that
+        // up now.
+        let num_items = (*array_job).range.end - (*array_job).range.start;
+        Event::signal_ptr(event, ctx, Event::MAX_DEPENDECIES - num_items);
     }
 }
 
 // Returns true if this execution was the one that put the event in the signaled state.
-unsafe fn execute_impl<I, CD, ID, F>(this: *const ArrayJob<I, CD, ID, F>, ctx: &mut Context, range: Range<u32>) -> bool
+unsafe fn execute_impl<I, CD, ID, F>(
+    this: *const ArrayJobData<I, CD, ID, F>,
+    event: *const Event,
+    ctx: &mut Context,
+    range: Range<u32>
+) -> bool
 where
     F: Fn(&mut Context, Args<I, CD, ID>) + Send,
 
@@ -406,7 +417,7 @@ where
 
     assert!(range.start >= (*this).range.start && range.end <= (*this).range.end);
 
-    let (context_data, immutable_data) = (*this).data.get(ctx);
+    let (context_data, immutable_data) = (*this).refs.get(ctx);
 
     for item_idx in range {
         // SAFETY: The situation for the item pointer is the same as with context_data.
@@ -423,7 +434,7 @@ where
         ((*this).function)(ctx, args);
     }
 
-    Event::signal_ptr(&(*this).event, ctx, n)
+    Event::signal_ptr(event, ctx, n)
 }
 
 impl<Item, ContextData, ImmutableData, Func> Job for ArrayJob<Item, ContextData, ImmutableData, Func>
@@ -431,7 +442,7 @@ where
     Func: Fn(&mut Context, Args<Item, ContextData, ImmutableData>) + Send,
 {
     unsafe fn execute(this: *const Self, ctx: &mut Context, range: Range<u32>) {
-        execute_impl(this, ctx, range);
+        execute_impl(&(*this).data, &(*this).event, ctx, range);
     }
 }
 
@@ -442,23 +453,25 @@ where
     pub unsafe fn new(
         items: &mut[Item],
         split_thresold: u32,
-        data: ConcurrentDataRef<ContextData, ImmutableData>,
+        refs: ConcurrentDataRef<ContextData, ImmutableData>,
         function: Func,
         event: Event
     ) -> Self {
         ArrayJob {
-            items: items.as_mut_ptr(),
-            data,
-            function,
+            data: ArrayJobData {
+                items: items.as_mut_ptr(),
+                refs,
+                function,
+                range: 0..(items.len() as u32),
+                split_thresold,
+            },
             event,
-            range: 0..(items.len() as u32),
-            split_thresold,
         }
     }
 
     pub unsafe fn as_job_ref(&self, priority: Priority) -> JobRef {
         JobRef::new(self)
-            .with_range(self.range.start .. self.range.end.max(1), self.split_thresold)
+            .with_range(self.data.range.start .. self.data.range.end.max(1), self.data.split_thresold)
             .with_priority(priority)
     }
 }
@@ -528,14 +541,14 @@ impl<'l, Dependency, ContextData, ImmutableData> ForEachTaskBuilder<'l, Dependen
             let strong_ref: Option<*const dyn RefCounted> = None;
             let data = RefPtr::new(
                 HeapArrayJob {
-                    array_job: ArrayJob {
+                    data: UnsafeCell::new(ArrayJobData {
                         items: items.as_mut_ptr(),
                         range: 0..(items.len() as u32),
                         split_thresold: self.group_size,
-                        data: ConcurrentDataRef::from_owned(&mut parameters, ctx),
+                        refs: ConcurrentDataRef::from_owned(&mut parameters, ctx),
                         function,
-                        event: Event::new(range.end - range.start, ctx.thread_pool_id()),
-                    },
+                    }),
+                    event: Event::new(range.end - range.start, ctx.thread_pool_id()),
                     output: DataSlot::new(),
                     context_data: parameters.context_data,
                     immutable_data: parameters.immutable_data,
@@ -555,13 +568,13 @@ impl<'l, Dependency, ContextData, ImmutableData> ForEachTaskBuilder<'l, Dependen
 
             for_each_dispatch(
                 ctx,
-                JobRef::new(&data.array_job).with_priority(priority),
+                JobRef::new(data.inner()).with_priority(priority),
                 &dispatch,
                 self.group_size,
             );
 
-            let event: *const Event = &data.array_job.event;
-            let output: *const DataSlot<Vec<Item>> = &data.output;
+            let event: *const Event = &data.event;
+            let output = data.output.unsafe_ref();
 
             let data = data.into_any();
 
@@ -586,42 +599,43 @@ impl<'l, Dependency, ContextData, ImmutableData> ForEachTaskBuilder<'l, Dependen
             let priority = parameters.priority;
             let strong_ref: Option<*const dyn RefCounted> = None;
             let data = RefPtr::new(DeferredArrayJob {
-                heap_job: UnsafeCell::new(HeapArrayJob {
-                    array_job: ArrayJob {
+                heap_job: HeapArrayJob {
+                    data: UnsafeCell::new(ArrayJobData {
                         items: std::ptr::null_mut(),
                         range,
                         split_thresold: self.group_size,
-                        data: ConcurrentDataRef::from_owned(&mut parameters, ctx),
-                        function,
-                        // Hack: we don't know yet how many items we will process so we initialize
-                        // the event with the maximum number of dependencies and will adjust down
-                        // during the setup task.
-                        event: Event::new(Event::MAX_DEPENDECIES, ctx.thread_pool_id()),
-                    },
+                        refs: ConcurrentDataRef::from_owned(&mut parameters, ctx),
+                        function,    
+                    }),
+                    // Hack: we don't know yet how many items we will process so we initialize
+                    // the event with the maximum number of dependencies and will adjust down
+                    // during the setup task.
+                    event: Event::new(Event::MAX_DEPENDECIES, ctx.thread_pool_id()),
                     output: DataSlot::new(),
                     context_data: parameters.context_data,
                     immutable_data: parameters.immutable_data,
                     // One reference for the AnyRefPtr and one that will be released by
                     // the last execute callback.
                     strong_ref,
-                }),
+                },
                 group_size: self.group_size,
                 input: parameters.input,
                 priority: parameters.priority,
             });
 
-            let heap_job: *mut _ = (*RefPtr::mut_payload_unchecked(&data)).heap_job.get();
-            data.add_ref();
+            let heap_job: *mut _ = &mut (*RefPtr::mut_payload_unchecked(&data)).heap_job;
             (*heap_job).strong_ref = Some(RefPtr::as_raw(&data));
+            let heap_job: *const _ = heap_job;
 
-            let event: *const Event = &(*data.heap_job.get()).array_job.event;
-            let output: *const DataSlot<Vec<Item>> = &(*heap_job).output;
-
+            data.add_ref();
             // Schedule this task to run after its dependency is done.
             data.input
                 .get_event()
                 .unwrap()
                 .then(ctx, JobRef::new(data.inner()).with_priority(priority));
+
+            let event: *const Event = &(*data).heap_job.event;
+            let output = (*heap_job).output.unsafe_ref();
 
             let data = data.into_any();
 
@@ -655,15 +669,18 @@ fn div_ceil(a: u32, b: u32) -> u32 {
 fn test_heap_for_each() {
     use crate::ThreadPool;
 
+    let iterations = 200;
+    let arra_size = 1024;
+
     let pool = ThreadPool::builder().with_worker_threads(3).build();
 
     let mut ctx = pool.pop_context().unwrap();
 
-    let mut items1 = vec![0u32; 8192];
-    let mut items2 = vec![0u32; 8192];
-    let mut items3 = vec![0u32; 8192];
+    let mut items1 = vec![0u32; arra_size];
+    let mut items2 = vec![0u32; arra_size];
+    let mut items3 = vec![0u32; arra_size];
 
-    for i in 0..1000 {
+    for i in 0..iterations {
         use std::mem::take;
         let handle_1 = ctx.task()
             .with_data(take(&mut items1))
@@ -828,7 +845,7 @@ fn test_few_items() {
     let mut ctx = pool.pop_context().unwrap();
     let ctx_data = ctx.create_context_data(vec![(); 10]);
     for _ in 0..100 {
-        for n in 0..8 {
+        for n in 0..4 {
             let mut input = vec![0i32; n];
 
             ctx.for_each(&mut input)

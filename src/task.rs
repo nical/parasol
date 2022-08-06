@@ -7,7 +7,6 @@ use crate::array::ForEachTaskBuilder;
 use crate::ref_counted::{RefPtr, RefCounted, InlineRefCounted};
 use crate::sync::Arc;
 
-use std::mem;
 use std::ops::{Range};
 
 pub trait TaskDependency {
@@ -191,7 +190,7 @@ impl<'l, Dependency, ContextData, ImmutableData> TaskBuilder<'l, Dependency, Con
             task_job.add_ref();
 
             let event: *const Event = &task_job.event;
-            let output: *mut DataSlot<Output> = mem::transmute(&task_job.output);
+            let output = task_job.output.unsafe_ref();
 
             let job_ref = JobRef::new(task_job.inner()).with_priority(priority);
 
@@ -208,7 +207,6 @@ impl<'l, Dependency, ContextData, ImmutableData> TaskBuilder<'l, Dependency, Con
             )
         }
     }
-
 }
 
 struct TaskJobData<Output, ContextData, ImmutableData, Dependency, F> {
@@ -247,8 +245,9 @@ fn simple_task() {
 
     let mut ctx = pool.pop_context().unwrap();
 
-    let mut handles: Vec<OwnedHandle<u32>> = Vec::new();
-    for _ in 0..100_000 {
+    let n = 1000;
+    let mut handles: Vec<OwnedHandle<u32>> = Vec::with_capacity(n);
+    for _ in 0..n {
         handles.push(
             ctx.task().run(|_ctx, _args| { 1u32 + 1 })
         );
@@ -266,7 +265,7 @@ fn simple_task() {
     });
     assert_eq!(t2.resolve(&mut ctx), 3);
 
-    for _ in 0..100_000 {
+    for _ in 0..10_0000 {
         ctx.task().run(|_ctx, _args| { 1u32 + 1 });
     }
 
@@ -281,6 +280,37 @@ fn simple_task() {
     ctx.task().after(t3_done.clone()).run(move |_,_| { assert_eq!(c.load(Ordering::Acquire), 1); });
     let c = counter.clone();
     ctx.task().after(t3_done.clone()).run(move |_,_| { assert_eq!(c.load(Ordering::Acquire), 1); });
+
+    pool.shut_down().wait();
+}
+
+
+#[test]
+fn task_dependency() {
+    use crate::ThreadPool;
+    let pool = ThreadPool::builder()
+        .with_worker_threads(3)
+        .with_contexts(1)
+        .build();
+
+    let mut ctx = pool.pop_context().unwrap();
+
+    let n = 100;
+    let mut handles: Vec<OwnedHandle<u32>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        for _ in 0..10 {
+            ctx.task().run(|_ctx, _args| { 1u32 });
+        }
+    
+        let handle = ctx.task().run(|_ctx, _args| { 1u32 });
+        let handle = ctx.then(handle).run(|_ctx, args| args.input + 1);
+        let handle = ctx.then(handle).run(|_ctx, args| args.input + 1);
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        assert_eq!(handle.resolve(&mut ctx), 3);
+    }
 
     pool.shut_down().wait();
 }
