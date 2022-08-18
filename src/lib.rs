@@ -37,6 +37,7 @@ pub use crate::core::shutdown::ShutdownHandle;
 pub use crate::core::sync;
 
 pub use crossbeam_utils::CachePadded;
+pub use aliasable::boxed::AliasableBox;
 
 /*
 
