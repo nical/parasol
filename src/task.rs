@@ -147,7 +147,7 @@ impl<'l, ContextData, ImmutableData> TaskBuilder<'l, (), ContextData, ImmutableD
 
 pub struct Args<'l, Input, ContextData, ImmutableData> {
     pub input: Input,
-    pub context_data: &'l mut ContextData,
+    pub context_data: Mut<'l, ContextData>,
     pub immutable_data: &'l ImmutableData,
 }
 
@@ -301,7 +301,7 @@ fn task_dependency() {
         for _ in 0..10 {
             ctx.task().run(|_ctx, _args| { 1u32 });
         }
-    
+
         let handle = ctx.task().run(|_ctx, _args| { 1u32 });
         let handle = ctx.then(handle).run(|_ctx, args| args.input + 1);
         let handle = ctx.then(handle).run(|_ctx, args| args.input + 1);

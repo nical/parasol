@@ -1,15 +1,58 @@
 //! Helpers to build high level parallel execution primitives on top of the core.
 //!
-//! 
+//!
 
 use crate::array::{ForEachBuilder, new_for_each};
 use crate::join::{JoinBuilder, new_join};
 use crate::{Context, ContextId, Priority};
 use crate::task::TaskParameters;
 
-use std::ops::Deref;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::ptr::NonNull;
+
+/// A mutable pointer wrapper that is functionally equivalent to `&mut T` but
+/// avoids creating a protected `&mut` reference at function boundaries.
+///
+// This is necessary to pass tests under miri because re-entrant job execution
+// (e.g. nested for_each stealing outer jobs) can create multiple simultaneous
+// access paths to elements of the same allocation on the same thread. With a
+// regular `&mut T`, Tree Borrows would flag the re-entrant access as UB
+// because the outer `&mut` is "protected" for the duration of the closure call,
+// even when the accesses target non-overlapping elements.
+pub struct Mut<'l, T> {
+    ptr: *mut T,
+    _marker: std::marker::PhantomData<&'l mut T>,
+}
+
+impl<'l, T> Mut<'l, T> {
+    #[inline]
+    pub(crate) unsafe fn new(ptr: *mut T) -> Self {
+        Mut { ptr, _marker: std::marker::PhantomData }
+    }
+
+    pub(crate) unsafe fn clone(&self) -> Self {
+        Mut {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'l, T> Deref for Mut<'l, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T { unsafe { &*self.ptr } }
+}
+
+impl<'l, T> DerefMut for Mut<'l, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T { unsafe { &mut *self.ptr } }
+}
+
+/// Type alias for context data references in job callbacks.
+pub type ContextDataMut<'l, T> = Mut<'l, T>;
 
 /// A builder for common execution parameters such as priority and context data.
 pub struct Parameters<'c, 'cd, 'id, ContextData, ImmutableData> {
@@ -193,7 +236,7 @@ pub struct ContextDataRef<ContextData> {
 
 impl<ContextData> ContextDataRef<ContextData> {
     #[inline]
-    pub unsafe fn get<'l>(&self, ctx: &Context) -> &'l mut ContextData {
+    pub unsafe fn get<'l>(&self, ctx: &Context) -> Mut<'l, ContextData> {
         let context_data_index = ctx.data_index() as isize;
         // SAFETY: Here we rely two very important things:
         // - If there is no context data, then it's type is `()`, which means reads and writes
@@ -202,9 +245,7 @@ impl<ContextData> ContextDataRef<ContextData> {
         //
         // As a result it is impossible to craft a pointer that will read or write out of bounds
         // here.
-        //
-        // TODO: unfortunately miri errors when producing &mut () from a null pointer.
-        &mut *self.ptr.as_ptr().wrapping_offset(context_data_index)
+        Mut::new(self.ptr.as_ptr().wrapping_offset(context_data_index))
     }
 
     /// Returns unsafe references to the context data and immutable data.
@@ -272,7 +313,7 @@ pub struct ConcurrentDataRef<ContextData, ImmutableData> {
 }
 
 impl<ContextData, ImmutableData> ConcurrentDataRef<ContextData, ImmutableData> {
-    pub unsafe fn get(&self, ctx: &Context) -> (&mut ContextData, &ImmutableData) {
+    pub unsafe fn get(&self, ctx: &Context) -> (Mut<'_, ContextData>, &ImmutableData) {
         (
             self.context_data.get(ctx),
             self.immutable_data.get(),

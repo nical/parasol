@@ -1,6 +1,6 @@
 use crate::core::event::{Event, EventRef};
 use crate::core::job::{JobRef, Job, Priority};
-use crate::helpers::{Parameters, ConcurrentDataRef};
+use crate::helpers::{Parameters, ConcurrentDataRef, Mut};
 use crate::Context;
 
 use std::mem;
@@ -9,7 +9,7 @@ use std::cell::UnsafeCell;
 
 
 pub struct Args<'l, ContextData, ImmutableData> {
-    pub context_data: &'l mut ContextData,
+    pub context_data: Mut<'l, ContextData>,
     pub immutable_data: &'l ImmutableData,
 }
 
@@ -20,7 +20,7 @@ pub struct JoinBuilder<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2> {
 }
 
 #[inline]
-pub (crate) fn new_join<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2>(inner: Parameters<'c, 'cd, 'id, ContextData, ImmutableData>, f1: F1, f2: F2) -> JoinBuilder<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2> 
+pub (crate) fn new_join<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2>(inner: Parameters<'c, 'cd, 'id, ContextData, ImmutableData>, f1: F1, f2: F2) -> JoinBuilder<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2>
 where
     F1: FnOnce(&mut Context, Args<ContextData, ImmutableData>) + Send,
     F2: FnOnce(&mut Context, Args<ContextData, ImmutableData>) + Send,
@@ -70,7 +70,7 @@ impl<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2> JoinBuilder<'c, 'cd, 'id,
     }
 }
 
-impl<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2> JoinBuilder<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2> 
+impl<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2> JoinBuilder<'c, 'cd, 'id, ContextData, ImmutableData, F1, F2>
 where
     F1: FnOnce(&mut Context, Args<ContextData, ImmutableData>) + Send,
     F2: FnOnce(&mut Context, Args<ContextData, ImmutableData>) + Send,

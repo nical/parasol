@@ -12,19 +12,19 @@ use std::cell::UnsafeCell;
 
 /// Input parameter of parallel `for_each` closures.
 pub struct Args<'l, Item, ContextData, ImmutableData> {
-    pub item: &'l mut Item,
+    pub item: Mut<'l, Item>,
     pub item_index: u32,
-    pub context_data: &'l mut ContextData,
+    pub context_data: Mut<'l, ContextData>,
     pub immutable_data: &'l ImmutableData,
 }
 
 impl<'l, Item, ContextData, ImmutableData> Deref for Args<'l, Item, ContextData, ImmutableData> {
     type Target = Item;
-    fn deref(&self) -> &Item { self.item }
+    fn deref(&self) -> &Item { &*self.item }
 }
 
 impl<'l, Item, ContextData, ImmutableData> DerefMut for Args<'l, Item, ContextData, ImmutableData> {
-    fn deref_mut(&mut self) -> &mut Item { self.item }
+    fn deref_mut(&mut self) -> &mut Item { &mut *self.item }
 }
 
 pub struct ForEachBuilder<'a, 'b, 'g, 'c, Item, ContextData, ImmutableData, Func> {
@@ -212,12 +212,12 @@ where
             profiling::scope!("mt:job group");
             let (context_data, immutable_data) = job_data.data.refs.get(ctx);
             for item_index in first_item..parallel.range.start {
-                let item = &mut params.items[item_index as usize];
+                let item = Mut::new(&mut params.items[item_index as usize] as *mut _);
                 profiling::scope!("mt:job");
                 let args = Args {
                     item,
                     item_index,
-                    context_data,
+                    context_data: context_data.clone(),
                     immutable_data,
                 };
 
@@ -422,12 +422,12 @@ where
     for item_idx in range {
         // SAFETY: The situation for the item pointer is the same as with context_data.
         // The pointer can be dangling, but when it is the case, the type is always ().
-        let item = &mut *(*this).items.wrapping_offset(item_idx as isize);
+        let item = Mut::new((*this).items.wrapping_offset(item_idx as isize));
         profiling::scope!("job");
         let args = Args {
             item,
             item_index: item_idx,
-            context_data,
+            context_data: context_data.clone(),
             immutable_data,
         };
 
@@ -783,19 +783,21 @@ fn test_nested_for_each() {
 
     let mut ctx = pool.pop_context().unwrap();
 
-    for _ in 0..200 {
+    let outer_iters = if cfg!(miri) { 2 } else { 200 };
+    for _ in 0..outer_iters {
         let input = &mut [0i32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let worker_data = &mut [0i32, 0, 0, 0];
 
         ctx.for_each(input)
             .with_context_data(worker_data)
-            .run(|ctx, args| {
+            .run(|ctx, mut args| {
                 let _v: i32 = *args;
                 *args.context_data += 1;
                 *args.item *= 2;
                 //println!(" * worker {:} : {:?} * 2 = {:?}", ctx.id(), _v, item);
 
-                for i in 0..10 {
+                let inner_iters = if cfg!(miri) { 2 } else { 10 };
+                for i in 0..inner_iters {
                     let priority = if i % 2 == 0 { Priority::High } else { Priority::Low };
                     let nested_input = &mut [0i32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                     ctx.with_priority(priority)
@@ -813,7 +815,8 @@ fn test_nested_for_each() {
                         assert_eq!(*item, 0);
                     }
 
-                    for j in 0..100 {
+                    let innermost_iters = if cfg!(miri) { 5 } else { 100 };
+                    for j in 0..innermost_iters {
                         let priority = if j % 2 == 0 { Priority::High } else { Priority::Low };
                         let nested_input = &mut [0i32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                         ctx.for_each(nested_input)
