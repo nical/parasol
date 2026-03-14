@@ -605,7 +605,7 @@ impl<'l, Dependency, ContextData, ImmutableData> ForEachTaskBuilder<'l, Dependen
                         range,
                         split_thresold: self.group_size,
                         refs: ConcurrentDataRef::from_owned(&mut parameters, ctx),
-                        function,    
+                        function,
                     }),
                     // Hack: we don't know yet how many items we will process so we initialize
                     // the event with the maximum number of dependencies and will adjust down
@@ -892,39 +892,4 @@ fn test_heap_for_each_dependencies() {
     assert_eq!(result, Vec::new());
 
     pool.shut_down().wait();
-}
-
-#[cfg(loom)]
-#[test]
-fn test_loom_for_each() {
-    // TODO: this test deadlocks during shutdown, likely because crossbeam_utils::Parker
-    // isn't part of loom's visible model. When shutdown starts we first store a shutdown
-    // flag (SeqCst) and unpark the worker threads. When executing with loom we can see the
-    // worker unparking but they don't see the flag (they should).
-    // I've tried to compile crossbeam utils with the crossbeam_loom cfg but the build fails
-    // all over the place.
-
-    loom::model(move || {
-        let pool = crate::ThreadPool::builder()
-            .with_worker_threads(2)
-            .with_contexts(1)
-            .build();
-
-        let mut ctx = pool.pop_context().unwrap();
-
-        let input = &mut [0i32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-        let ctx_data = &mut [0i32, 0, 0];
-
-        ctx.for_each(input)
-            .with_context_data(ctx_data)
-            .run(|_, args| {
-                *args.context_data += 1;
-                *args.item *= 2;
-            });
-
-        assert_eq!(input, &[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]);
-        assert_eq!(ctx_data[0] + ctx_data[1] + ctx_data[2], 16);
-
-        pool.recycle_context(ctx);
-    });
 }

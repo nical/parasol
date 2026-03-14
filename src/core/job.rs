@@ -55,7 +55,7 @@ pub trait Job {
 ///
 /// Note that if a JobRef can be split, it will result in multiple JobRefs pointing
 /// to the same pointer and execute_fn.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug)]
 pub struct JobRef {
     // The "deconstructed trait object" part, taken directly from rayon.
     pointer: *const (),

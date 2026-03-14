@@ -1,3 +1,5 @@
+#![allow(mismatched_lifetime_syntaxes)]
+
 //! An experimental parallel job scheduler with the goal of doing better than rayon
 //! specifically in the types of workloads we have in Firefox.
 //!

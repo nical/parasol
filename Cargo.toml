@@ -16,10 +16,6 @@ crossbeam-utils = "0.8"
 aliasable = "0.1.3"
 profiling = "1.0.4"
 
-# The loom build does not work because a lot of crossbeam doesn't support it.
-[target.'cfg(loom)'.dependencies]
-loom = "0.5.4"
-
 [dev-dependencies]
 criterion = "0.3"
 

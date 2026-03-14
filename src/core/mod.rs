@@ -3,8 +3,6 @@ pub mod context;
 pub mod event;
 pub mod thread_pool;
 pub mod shutdown;
-/// basic std::sync types reexported here so that we can hook loom into them for
-/// testing.
 pub mod sync;
 
 use crossbeam_deque::{Stealer, Steal, Worker as WorkerQueue};
@@ -16,7 +14,6 @@ use thread_pool::{ThreadPool, ThreadPoolBuilder, ThreadPoolId};
 use context::{Context, ContextId, ContextPool};
 use shutdown::Shutdown;
 
-// Use std's atomic type explicitly here because loom's doesn't support static initialization.
 static NEXT_THREADPOOL_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Data accessible by all contexts from any thread.
@@ -454,4 +451,3 @@ pub trait WorkerHook: Send + Sync {
 impl<F> WorkerHook for F where F: Fn(u32) + Send + Sync + 'static {
     fn run(&self, worker_id: u32) { self(worker_id) }
 }
-

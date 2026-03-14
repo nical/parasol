@@ -1,4 +1,4 @@
-use super::sync::{Ordering, AtomicI32, AtomicPtr, Mutex, Condvar};
+use super::sync::{Ordering, AtomicI32, AtomicPtr, Mutex, Condvar, fence};
 use super::Context;
 use super::job::JobRef;
 use super::thread_pool::ThreadPoolId;
@@ -7,7 +7,6 @@ use crossbeam_utils::Backoff;
 use aliasable::boxed::AliasableBox;
 
 // For debugging.
-// Use std's atomic type explicitly here because loom's doesn't support static initialization.
 static NEXT_EVENT_ID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(12345);
 
 const STATE_DEFAULT: i32 = 0;
@@ -15,7 +14,7 @@ const STATE_SIGNALING: i32 = 1;
 const STATE_SIGNALED: i32 = 2;
 
 /// Use this instead of Box<Event>.
-/// 
+///
 /// This is very much like a Box<Event>, however, it allows mixing `*const Event` and and `&Event`
 /// access to its content, which according to miri's current borrowing model is not allowed for
 /// the content of a standard Box.
@@ -80,7 +79,7 @@ impl Event {
     // pub(crate) fn log_deps(&self) {
     //     println!("event {:?}: {}", self as *const _, self.deps.load(Ordering::SeqCst));
     // }
-    
+
     /// Creates a boxed event.
     pub fn new_boxed(deps: u32, pool_id: ThreadPoolId) -> BoxedEvent {
         AliasableBox::from_unique(Box::new(Event::new(deps, pool_id)))
@@ -125,7 +124,9 @@ impl Event {
 
         profiling::scope!("signal");
         let n = n as i32;
-        let deps = (*this).deps.fetch_add(-n, Ordering::Relaxed) - n;
+        // Release: ensures that writes done by this thread (e.g. item mutations)
+        // are visible to whichever thread performs the final decrement.
+        let deps = (*this).deps.fetch_add(-n, Ordering::Release) - n;
 
         if deps > 0 {
             // After reading deps, it isn't guaranteed that self is valid except for the
@@ -135,6 +136,11 @@ impl Event {
         }
 
         debug_assert!(deps == 0, "signaled too many time");
+
+        // Acquire: synchronize with the Release fetch_add from all previous
+        // signalers, so that their writes are visible before we signal
+        // completion. This is the same pattern as Arc::drop.
+        fence(Ordering::Acquire);
 
         (*this).state.store(STATE_SIGNALING, Ordering::SeqCst);
 
@@ -183,7 +189,9 @@ impl Event {
 
         profiling::scope!("signal");
         let n = n as i32;
-        let deps = (*this).deps.fetch_add(-n, Ordering::Relaxed) - n;
+        // Release: ensures that writes done by this thread are visible to
+        // whichever thread performs the final decrement.
+        let deps = (*this).deps.fetch_add(-n, Ordering::Release) - n;
 
         if deps > 0 {
             // After reading deps, it isn't guaranteed that self is valid except for the
@@ -193,6 +201,10 @@ impl Event {
         }
 
         debug_assert!(deps == 0, "signaled too many time");
+
+        // Acquire: synchronize with the Release fetch_add from all previous
+        // signalers. Same pattern as Arc::drop.
+        fence(Ordering::Acquire);
 
         (*this).state.store(STATE_SIGNALING, Ordering::SeqCst);
 
@@ -327,9 +339,6 @@ impl Event {
             }
 
             backoff.spin();
-
-            #[cfg(loom)]
-            loom::thread::yield_now();
         }
 
         // The majority of the time we only check state once. If we are unlucky we
@@ -338,9 +347,6 @@ impl Event {
         while self.state.load(Ordering::Acquire) != STATE_SIGNALED {
             ctx.keep_busy();
             i += 1;
-
-            #[cfg(loom)]
-            loom::thread::yield_now();
         }
 
         ctx.stats.cond_wait_spin += 1;
